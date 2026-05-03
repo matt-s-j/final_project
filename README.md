@@ -1,6 +1,5 @@
 ---
 title: AI Feedback Workflow MVP
-emoji: F
 colorFrom: blue
 colorTo: yellow
 sdk: gradio
