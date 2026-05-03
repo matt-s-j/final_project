@@ -1,0 +1,6 @@
+gradio==5.29.1
+requests==2.32.3
+python-dotenv==1.0.1
+pydantic==2.11.4
+pytest==8.3.5
+huggingface_hub>=0.24.0
