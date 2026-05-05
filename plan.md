@@ -50,7 +50,7 @@ Build a Python-only MVP for a professional feedback workflow using Gradio, with 
 ## ToDos:
 - [x] Break out separate markdown files for the system prompts of the two agents
 - [x] Fix UI positioning of text boxes
-- Hookup AI model backend using huggingface to test out real user experience
+- [x] Hookup AI model backend using huggingface to test out real user experience
 - Clean up UI. 
     - Remove the Phase 1 Status box.
     - Make send response button orange or more vibrant

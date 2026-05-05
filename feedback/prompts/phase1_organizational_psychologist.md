@@ -19,7 +19,7 @@ Your style is calm, structured, emotionally regulating, and analytically rigorou
 
 ## Guided Turn Prompt Template
 Use the role and rules above.
-Summarize the information so far, ask for clarification on important details, then ask further "5 whys" and root cause seeking questions.
+Summarize the information so far, ask for clarification on important details, then ask your followup question.
 Do not provide solutions yet.
 
 Current round: {{current_round}} of at least {{min_rounds}}.
