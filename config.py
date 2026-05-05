@@ -10,6 +10,7 @@ Copy .env.example to .env and fill in values before running locally.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -18,6 +19,20 @@ from dotenv import load_dotenv
 # Load environment variables from .env (if present). This is a no-op when
 # the variables are already set in the process environment (e.g. on HF Spaces).
 load_dotenv()
+
+
+def _resolve_prompts_dir() -> str:
+    """Resolve prompt directory to an absolute path.
+
+    Returns:
+        Absolute path to the prompt directory, honoring PROMPTS_DIR when set.
+    """
+    project_root = Path(__file__).resolve().parent
+    configured_value = os.getenv("PROMPTS_DIR", "feedback/prompts")
+    configured_path = Path(configured_value).expanduser()
+    if not configured_path.is_absolute():
+        configured_path = project_root / configured_path
+    return str(configured_path.resolve())
 
 
 @dataclass(frozen=True)
@@ -58,7 +73,7 @@ class Settings:
     discovery_min_rounds: int = int(os.getenv("DISCOVERY_MIN_ROUNDS", "3"))
 
     # Directory containing markdown prompt specs for both bots.
-    prompts_dir: str = os.getenv("PROMPTS_DIR", "feedback/prompts")
+    prompts_dir: str = _resolve_prompts_dir()
 
 
 # Module-level singleton — import `settings` directly rather than re-instantiating.

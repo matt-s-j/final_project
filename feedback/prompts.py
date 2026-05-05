@@ -1,8 +1,9 @@
 """Prompt loading and rendering utilities.
 
-This module externalizes bot behavior into markdown files so prompt updates can
-happen without editing orchestration code. It loads one markdown file per bot,
-extracts the relevant sections, and renders placeholders with runtime context.
+This module intentionally keeps prompt handling lightweight for rapid iteration:
+- Prompt files are loaded when available.
+- Missing files/sections never crash startup.
+- Each public builder returns a usable fallback prompt.
 """
 
 from __future__ import annotations
@@ -18,45 +19,32 @@ PHASE_1_FILENAME = "phase1_organizational_psychologist.md"
 PHASE_2_FILENAME = "phase2_professional_rewriter.md"
 
 
-FALLBACK_PHASE_1_SPEC = """# Phase 1 Bot: Organizational Psychologist
-
-## Guided Turn Prompt Template
-You are an expert organizational psychologist facilitating a workplace feedback intake.
-Your role is part fact-finder, part therapist, and part calm but critical guide.
-Use a 5-whys style approach to move from symptoms to deeper causes.
-Ask exactly one concise follow-up question.
-Do not summarize yet.
-Do not give advice yet.
-Keep the tone grounded, emotionally regulating, and analytically sharp.
+DEFAULT_PHASE_1_GUIDED_TEMPLATE = """You are a calm organizational feedback coach.
+Ask exactly one focused follow-up question that helps uncover root causes.
+Do not provide solutions yet.
 
 Current round: {{current_round}} of at least {{min_rounds}}.
 Conversation so far:
 {{conversation}}
+"""
 
-## Discovery Summary Prompt Template
-You are an expert organizational psychologist summarizing a guided workplace intake.
-Return ONLY valid JSON with this schema:
-{"summary": string, "root_causes": string[], "prioritized_issues": string[], "risk_flags": string[]}
-The summary must reflect a 5-whys style root-cause analysis based on the conversation.
-Keep language professional, calm, and grounded in facts.
+DEFAULT_PHASE_1_SUMMARY_TEMPLATE = """Summarize the discovery conversation as strict JSON only.
+Schema: {"summary": string, "root_causes": string[], "prioritized_issues": string[], "risk_flags": string[]}
 
 Conversation:
 {{conversation}}
-
-## Fallback Questions
-- Thank you for laying that out. Let's slow this down and get specific. What concrete behavior, event, or exchange made this issue feel important right now?
-- Why do you think that happened? Look beneath the immediate symptom and name the pressures, assumptions, or habits that may have driven it.
-- Why do you think those underlying conditions existed? Consider incentives, role confusion, communication gaps, or broader team dynamics.
-- If that deeper pattern stays unchanged, what is the real organizational risk or repeated outcome you are most concerned about?
 """
 
+DEFAULT_PHASE_1_FALLBACK_QUESTIONS = [
+    "Thank you for sharing that. What concrete behavior or moment made this issue feel important right now?",
+    "Looking beneath the symptom, what pressures or assumptions do you think contributed most?",
+    "What pattern seems to keep this issue repeating across interactions or handoffs?",
+    "If this pattern stays unchanged, what risk or recurring impact concerns you most?",
+]
 
-FALLBACK_PHASE_2_SPEC = """# Phase 2 Bot: Professional Rewriter
-
-## Rewrite Prompt Template
-Rewrite the feedback into a professional, actionable message.
-Use neutral tone and clear next steps.
-Keep under 180 words.
+DEFAULT_PHASE_2_REWRITE_TEMPLATE = """Rewrite the feedback into a professional, actionable SBI entry for a specific individual.
+Use neutral tone, concrete behavior, clear impact, and next steps.
+Target roughly 100-300 words.
 
 Original feedback:
 {{original_feedback}}
@@ -67,29 +55,30 @@ Diagnosed priorities:
 
 
 class PromptLibrary:
-    """Load and render bot prompts from markdown files.
-
-    The loader caches prompt specs in memory after first read. If files are
-    missing or malformed, the library falls back to embedded defaults.
+    """Load and render bot prompts with permissive fallbacks.
 
     Args:
         prompts_dir: Optional path to prompt markdown files. Defaults to
-            ``settings.prompts_dir``.
+            settings.prompts_dir.
     """
 
     def __init__(self, prompts_dir: str | None = None) -> None:
+        """Initialize the prompt library.
+
+        Args:
+            prompts_dir: Optional prompt directory override used by tests.
+        """
         self._prompts_dir = Path(prompts_dir or settings.prompts_dir)
         self._cache: dict[str, str] = {}
 
-    def _load_spec(self, filename: str, fallback_content: str) -> str:
-        """Load one markdown prompt spec with resilient fallback behavior.
+    def _load_spec(self, filename: str) -> str:
+        """Load prompt markdown from disk, returning empty text on failure.
 
         Args:
             filename: Prompt markdown file name.
-            fallback_content: Embedded fallback content used if file loading fails.
 
         Returns:
-            Prompt spec markdown content.
+            Prompt file content, or an empty string when unreadable/missing.
         """
         if filename in self._cache:
             return self._cache[filename]
@@ -97,25 +86,22 @@ class PromptLibrary:
         path = self._prompts_dir / filename
         try:
             content = path.read_text(encoding="utf-8")
-            # Empty prompt files should not replace a known-safe fallback.
-            if not content.strip():
-                content = fallback_content
         except OSError:
-            content = fallback_content
+            content = ""
 
         self._cache[filename] = content
         return content
 
     @staticmethod
     def _extract_section(markdown_text: str, heading: str) -> str | None:
-        """Extract a level-2 markdown section body by its heading text.
+        """Extract a level-2 markdown section by exact heading text.
 
         Args:
             markdown_text: Full markdown content.
-            heading: Exact level-2 heading text to extract.
+            heading: Exact level-2 heading text.
 
         Returns:
-            Section body or ``None`` if heading was not found.
+            Section body when found, otherwise None.
         """
         pattern = rf"^## {re.escape(heading)}\s*$([\s\S]*?)(?=^##\s+|\Z)"
         match = re.search(pattern, markdown_text, flags=re.MULTILINE)
@@ -125,14 +111,14 @@ class PromptLibrary:
 
     @staticmethod
     def _render(template_text: str, replacements: dict[str, str]) -> str:
-        """Render template placeholders in ``{{name}}`` format.
+        """Render template placeholders in {{name}} format.
 
         Args:
-            template_text: Template containing placeholders.
+            template_text: Template text containing placeholders.
             replacements: Mapping of placeholder key to replacement text.
 
         Returns:
-            Rendered prompt text.
+            Rendered text with placeholder substitutions.
         """
         rendered = template_text
         for key, value in replacements.items():
@@ -140,15 +126,36 @@ class PromptLibrary:
         return rendered
 
     def _phase_1_spec(self) -> str:
-        """Return the full Phase 1 prompt specification markdown."""
-        return self._load_spec(PHASE_1_FILENAME, FALLBACK_PHASE_1_SPEC)
+        """Return the full Phase 1 prompt markdown."""
+        return self._load_spec(PHASE_1_FILENAME)
 
     def _phase_2_spec(self) -> str:
-        """Return the full Phase 2 prompt specification markdown."""
-        return self._load_spec(PHASE_2_FILENAME, FALLBACK_PHASE_2_SPEC)
+        """Return the full Phase 2 prompt markdown."""
+        return self._load_spec(PHASE_2_FILENAME)
+
+    def _best_effort_template(self, spec: str, section_heading: str, default_template: str) -> str:
+        """Choose a template section when available, otherwise use the built-in default.
+
+        Only the named section is used from the prompt file. If it is absent or
+        the file is missing, the built-in default is used. The full file is never
+        used as a prompt to avoid sending large prose docs to the LLM.
+
+        Args:
+            spec: Full prompt markdown content.
+            section_heading: Preferred section heading to extract.
+            default_template: Known-safe built-in fallback template.
+
+        Returns:
+            Selected template text.
+        """
+        if spec:
+            section = self._extract_section(spec, section_heading)
+            if section:
+                return section
+        return default_template
 
     def get_phase_1_guided_turn_prompt(self, session: DiscoverySession) -> str:
-        """Build the guided discovery turn prompt from markdown spec.
+        """Build a guided discovery follow-up prompt.
 
         Args:
             session: Current discovery session.
@@ -157,10 +164,11 @@ class PromptLibrary:
             Rendered prompt for one guided follow-up turn.
         """
         spec = self._phase_1_spec()
-        fallback_spec = FALLBACK_PHASE_1_SPEC
-        template = self._extract_section(spec, "Guided Turn Prompt Template")
-        if not template:
-            template = self._extract_section(fallback_spec, "Guided Turn Prompt Template") or ""
+        template = self._best_effort_template(
+            spec,
+            "Guided Turn Prompt Template",
+            DEFAULT_PHASE_1_GUIDED_TEMPLATE,
+        )
 
         conversation = "\n".join(
             f"{message.role.upper()}: {message.content}" for message in session.messages
@@ -175,19 +183,20 @@ class PromptLibrary:
         )
 
     def get_phase_1_summary_prompt(self, session: DiscoverySession) -> str:
-        """Build the discovery summary prompt from markdown spec.
+        """Build a discovery summary prompt.
 
         Args:
             session: Completed discovery session.
 
         Returns:
-            Rendered prompt requesting structured JSON diagnosis.
+            Rendered prompt requesting structured diagnosis output.
         """
         spec = self._phase_1_spec()
-        fallback_spec = FALLBACK_PHASE_1_SPEC
-        template = self._extract_section(spec, "Discovery Summary Prompt Template")
-        if not template:
-            template = self._extract_section(fallback_spec, "Discovery Summary Prompt Template") or ""
+        template = self._best_effort_template(
+            spec,
+            "Discovery Summary Prompt Template",
+            DEFAULT_PHASE_1_SUMMARY_TEMPLATE,
+        )
 
         conversation = "\n".join(
             f"{message.role.upper()}: {message.content}" for message in session.messages
@@ -195,33 +204,30 @@ class PromptLibrary:
         return self._render(template, {"conversation": conversation})
 
     def get_phase_1_fallback_questions(self) -> list[str]:
-        """Return deterministic fallback questions from the Phase 1 prompt spec.
+        """Return deterministic fallback questions for local mode.
 
         Returns:
-            Ordered list of fallback questions for local mode.
+            Ordered list of fallback questions.
         """
         spec = self._phase_1_spec()
-        fallback_spec = FALLBACK_PHASE_1_SPEC
-        section = self._extract_section(spec, "Fallback Questions")
-        if not section:
-            section = self._extract_section(fallback_spec, "Fallback Questions") or ""
+        section = self._extract_section(spec, "Fallback Questions") if spec else None
+        source_text = section if section else spec
 
-        questions = []
-        for line in section.splitlines():
+        questions: list[str] = []
+        for line in source_text.splitlines():
             stripped = line.strip()
             if stripped.startswith("- "):
                 questions.append(stripped[2:].strip())
+            elif stripped.startswith('> "') and stripped.endswith('"'):
+                # Also accept block-quoted question lines used in prose prompt docs.
+                questions.append(stripped[3:-1].strip())
 
         if questions:
             return questions
-
-        # Defensive fallback in case a malformed prompt file removes list markers.
-        return [
-            "Thank you for laying that out. What concrete behavior made this issue feel important now?"
-        ]
+        return DEFAULT_PHASE_1_FALLBACK_QUESTIONS.copy()
 
     def get_phase_2_rewrite_prompt(self, user_text: str, diagnosis: DiscoveryResult) -> str:
-        """Build the rewrite prompt from markdown spec.
+        """Build a rewrite prompt from Phase 2 guidance.
 
         Args:
             user_text: Original user feedback text.
@@ -231,10 +237,11 @@ class PromptLibrary:
             Rendered prompt for rewrite generation.
         """
         spec = self._phase_2_spec()
-        fallback_spec = FALLBACK_PHASE_2_SPEC
-        template = self._extract_section(spec, "Rewrite Prompt Template")
-        if not template:
-            template = self._extract_section(fallback_spec, "Rewrite Prompt Template") or ""
+        template = self._best_effort_template(
+            spec,
+            "Rewrite Prompt Template",
+            DEFAULT_PHASE_2_REWRITE_TEMPLATE,
+        )
 
         diagnosed_priorities = "\n".join(
             f"- {item}" for item in diagnosis.prioritized_issues
