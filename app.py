@@ -89,84 +89,83 @@ def _composer_outputs(
     )
 
 
-def handle_start_discovery(user_text: str):
-    """Start the guided discovery flow and seed the Working Draft.
-
-    Args:
-        user_text: Initial issue statement from the user.
-
-    Returns:
-        Component updates for status, chatbot, session state, controls, and
-        right-side panel content.
-    """
-    result = start_discovery_session(user_text)
-
-    if not result.ok:
-        return (
-            result.user_message,
-            [],
-            None,
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            "",
-            "",
-            "",
-            None,
-            "",
-        )
-
-    assert result.session is not None
-    return (
-        result.user_message,
-        _format_chat_messages(result.session),
-        result.session.model_dump(),
-        gr.update(interactive=True),
-        gr.update(interactive=False),
-        user_text,
-        "",
-        "",
-        None,
-        "",
-    )
-
-
-def handle_continue_discovery(
-    user_reply: str,
+def handle_send_response(
+    user_input: str,
     session_state: dict | None,
     working_draft: str,
 ):
-    """Continue chat and refresh composer outputs in parallel after threshold.
+    """Unified handler for both the initial complaint and every follow-up reply.
+
+    When ``session_state`` is ``None`` this is the first submission, so it
+    calls ``start_discovery_session`` and seeds the Working Draft.  On every
+    subsequent call it delegates to ``continue_discovery_session``.
 
     Args:
-        user_reply: Latest user answer to the assistant.
-        session_state: Serialized discovery session from Gradio state.
-        working_draft: Current user-edited Working Draft text.
+        user_input: Text the user just typed — either the opening complaint or
+            an answer to the latest assistant question.
+        session_state: Serialized ``DiscoverySession`` from Gradio state, or
+            ``None`` before discovery has started.
+        working_draft: Current user-owned Working Draft text (used by the
+            composer after the minimum-rounds threshold is reached).
 
     Returns:
-        Component updates for status, chat, session, buttons, response box,
-        composer suggestion, discovery summary, and serialized discovery state.
+        Component updates for chatbot, session state, send button, complete
+        button, working draft, input box, composer suggestion, discovery
+        summary markdown, and serialized discovery state.
     """
-    session = DiscoverySession(**session_state) if session_state else None
-    result = continue_discovery_session(session, user_reply)
+    # --- First submission: start a new discovery session ---
+    if session_state is None:
+        result = start_discovery_session(user_input)
+        if not result.ok:
+            # Show the error as an assistant message so the user sees feedback
+            # without a dedicated status box.
+            error_chat = [{"role": "assistant", "content": f"⚠️ {result.user_message}"}]
+            return (
+                error_chat,
+                None,
+                gr.update(interactive=True),
+                gr.update(interactive=False),
+                gr.update(),
+                gr.update(),
+                "",
+                "",
+                None,
+            )
+        assert result.session is not None
+        return (
+            _format_chat_messages(result.session),
+            result.session.model_dump(),
+            gr.update(interactive=True),
+            gr.update(interactive=False),
+            user_input,   # seed the Working Draft with the opening complaint
+            "",           # clear the input box
+            "",
+            "",
+            None,
+        )
+
+    # --- Subsequent submissions: continue the existing session ---
+    session = DiscoverySession(**session_state)
+    result = continue_discovery_session(session, user_input)
     updated_session = result.session if result.session is not None else session
     can_complete = (
         updated_session is not None
         and updated_session.user_reply_count >= updated_session.min_rounds_required
     )
-    composer_suggestion, discovery_markdown, discovery_state = _composer_outputs(
+    composer_suggestion, discovery_markdown, new_discovery_state = _composer_outputs(
         updated_session,
         working_draft,
     )
     return (
-        result.user_message,
         _format_chat_messages(updated_session),
         updated_session.model_dump() if updated_session is not None else None,
         gr.update(interactive=True),
         gr.update(interactive=can_complete),
-        "",
+        gr.update(),     # leave Working Draft untouched — it is user-owned
+        "",              # clear the input box after each send
         composer_suggestion,
         discovery_markdown,
-        discovery_state,
+        new_discovery_state,
     )
 
 
@@ -178,20 +177,19 @@ def handle_complete_discovery(session_state: dict | None, working_draft: str):
         working_draft: Current user-edited Working Draft text.
 
     Returns:
-        Component updates for status, summary, completion control, composer
-        suggestion, and serialized discovery state.
+        Component updates for summary, completion control, composer suggestion,
+        and serialized discovery state.
     """
     session = DiscoverySession(**session_state) if session_state else None
     result = complete_discovery_session(session)
     if not result.ok or result.discovery is None:
-        return result.user_message, "", gr.update(interactive=False), "", None
+        return "", gr.update(interactive=False), "", None
 
     composer_suggestion, discovery_markdown, discovery_state = _composer_outputs(
         session,
         working_draft,
     )
     return (
-        result.user_message,
         discovery_markdown or _format_discovery(result.discovery),
         gr.update(interactive=True),
         composer_suggestion,
@@ -221,68 +219,44 @@ with gr.Blocks(title="AI Feedback Workflow MVP") as demo:
     with gr.Row(equal_height=False):
         # Left 60%: chat and discovery controls.
         with gr.Column(scale=3):
-            user_text = gr.Textbox(
-                label="Initial Issue Statement",
-                lines=8,
-                placeholder="Describe the workplace issue or feedback problem you want to unpack.",
-            )
-            start_discovery_btn = gr.Button("Start Guided Discovery", variant="primary")
-            status_box = gr.Textbox(label="Phase 1 Status", interactive=False)
             discovery_chat = gr.Chatbot(label="Guided Discovery", height=420)
             discovery_md = gr.Markdown(label="Discovery Summary")
 
             with gr.Row():
                 phase_one_reply = gr.Textbox(
-                    label="Phase 1 Response",
+                    label="Your message",
                     lines=4,
-                    placeholder="Answer the assistant's latest question here.",
+                    placeholder="Describe your workplace issue, or answer the assistant's latest question.",
                     scale=4,
                 )
                 with gr.Column(scale=1):
-                    continue_discovery_btn = gr.Button("Send Response", interactive=False)
+                    continue_discovery_btn = gr.Button("Send", variant="primary", interactive=True)
                     complete_discovery_btn = gr.Button("Complete Discovery", interactive=False)
 
-        # Right 40%: user-owned draft plus AI-only suggestion pane.
+        # Right 40%: AI suggestion on top, user-owned draft below.
         with gr.Column(scale=2):
-            working_draft = gr.Textbox(
-                label="Working Draft",
-                lines=14,
-                placeholder="Your initial issue statement will appear here after you start discovery.",
-            )
             composer_suggestion = gr.Textbox(
                 label="Composer Suggestion",
                 lines=14,
                 interactive=False,
                 placeholder="Composer suggestions will appear here after the minimum fact-finding turns are complete.",
             )
+            working_draft = gr.Textbox(
+                label="Working Draft",
+                lines=14,
+                placeholder="Your initial issue statement will appear here after you start discovery.",
+            )
 
     # --- Event Wiring ---
-    start_discovery_btn.click(
-        fn=handle_start_discovery,
-        inputs=[user_text],
+    continue_discovery_btn.click(
+        fn=handle_send_response,
+        inputs=[phase_one_reply, discovery_session_state, working_draft],
         outputs=[
-            status_box,
             discovery_chat,
             discovery_session_state,
             continue_discovery_btn,
             complete_discovery_btn,
             working_draft,
-            composer_suggestion,
-            discovery_md,
-            discovery_state,
-            phase_one_reply,
-        ],
-    )
-
-    continue_discovery_btn.click(
-        fn=handle_continue_discovery,
-        inputs=[phase_one_reply, discovery_session_state, working_draft],
-        outputs=[
-            status_box,
-            discovery_chat,
-            discovery_session_state,
-            continue_discovery_btn,
-            complete_discovery_btn,
             phase_one_reply,
             composer_suggestion,
             discovery_md,
@@ -294,7 +268,6 @@ with gr.Blocks(title="AI Feedback Workflow MVP") as demo:
         fn=handle_complete_discovery,
         inputs=[discovery_session_state, working_draft],
         outputs=[
-            status_box,
             discovery_md,
             complete_discovery_btn,
             composer_suggestion,
