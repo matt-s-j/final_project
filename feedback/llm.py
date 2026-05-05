@@ -1,203 +1,114 @@
 """Hugging Face Inference API client.
 
-This module provides a thin wrapper around the HF Inference API using the
-official huggingface_hub library. It normalizes errors so that the processor
-layer can decide whether to fall back to local rules.
+Thin wrapper around InferenceClient.chat_completion. Three methods, no fallbacks.
+Errors propagate naturally to the caller.
 """
 
-from __future__ import annotations
-
 import json
-import re
-from typing import Any
 
 from huggingface_hub import InferenceClient
 
 from config import settings
 
 
-class LLMError(RuntimeError):
-    """Raised when inference fails or returns invalid output.
-
-    Callers should catch this and apply the appropriate fallback strategy
-    rather than letting it propagate to the UI.
-    """
-
-
 class HFInferenceClient:
-    """Client for Hugging Face Inference API using the official hub library.
-
-    Wraps text generation calls (discovery and rewrite) with shared error
-    handling and response parsing. Both calls use the same auth token but
-    can target different model IDs.
+    """Client for Hugging Face Inference API.
 
     Args:
-        token: HF API bearer token. Falls back to ``settings.hf_api_token``
-            if not provided.
-        timeout_seconds: HTTP timeout in seconds. Falls back to
-            ``settings.hf_timeout_seconds`` if not provided.
+        token: HF API bearer token. Defaults to settings.hf_api_token.
+        timeout_seconds: HTTP timeout in seconds. Defaults to settings.hf_timeout_seconds.
     """
 
     def __init__(self, token: str | None = None, timeout_seconds: int | None = None) -> None:
         """Initialize the inference client.
-        
+
         Args:
             token: HF API bearer token, defaults to settings.hf_api_token.
             timeout_seconds: HTTP timeout, defaults to settings.hf_timeout_seconds.
         """
         self._token = token if token is not None else settings.hf_api_token
-        self._timeout = (
-            timeout_seconds if timeout_seconds is not None else settings.hf_timeout_seconds
-        )
-        # Primary path: force the official HF Inference provider to avoid
-        # provider auto-selection bugs and task/provider mismatches.
+        self._timeout = timeout_seconds if timeout_seconds is not None else settings.hf_timeout_seconds
         self._client = InferenceClient(
-            model=None,
-            provider="hf-inference",
-            token=self._token,
-            timeout=self._timeout,
-        )
-        # Secondary path: auto provider selection can still be useful for
-        # models exposed only through conversational APIs.
-        self._fallback_client = InferenceClient(
-            model=None,
-            provider="auto",
             token=self._token,
             timeout=self._timeout,
         )
 
-    def _call_model(self, model_id: str, prompt: str, max_tokens: int = 400) -> str:
-        """Call the HF Inference API for text generation.
+    def ask_question(self, system_prompt: str, messages: list[dict]) -> str:
+        """Ask the next guided discovery question given the conversation so far.
 
         Args:
-            model_id: The HF model repository ID (e.g. ``mistralai/Mistral-7B-Instruct-v0.1``).
-            prompt: The full prompt string to send.
-            max_tokens: Maximum number of new tokens the model should generate.
+            system_prompt: Full Phase 1 system prompt text.
+            messages: Conversation history as a list of {"role", "content"} dicts.
 
         Returns:
-            The raw generated text string from the model.
-
-        Raises:
-            LLMError: If the token is missing, the request fails, or response is invalid.
+            The assistant's next follow-up question as a plain string.
         """
-        if not self._token:
-            raise LLMError("Missing HF_API_TOKEN. Configure .env before model inference.")
+        full_messages = [{"role": "system", "content": system_prompt}] + messages
+        response = self._client.chat_completion(
+            messages=full_messages,
+            model=settings.hf_model_discovery,
+            max_tokens=300,
+            temperature=0.2,
+        )
+        return response.choices[0].message.content.strip()
 
-        print(f"[DEBUG] HF request: model={model_id}, token_len={len(self._token) if self._token else 0}, timeout={self._timeout}s")
-        
-        try:
-            response = self._client.text_generation(
-                prompt,
-                model=model_id,
-                max_new_tokens=max_tokens,
-                temperature=0.2,
-                return_full_text=False,
-            )
-            text = str(response).strip()
-            if not text:
-                raise ValueError("Empty response from text_generation.")
-            print(f"[DEBUG] HF response: text_generation ok, chars={len(text)}")
-            return text
-        except Exception as text_gen_error:
-            print(
-                "[DEBUG] HF text_generation exception: "
-                f"{type(text_gen_error).__name__}: {text_gen_error}"
-            )
+    def summarize_discovery(self, system_prompt: str, messages: list[dict]) -> dict:
+        """Summarize the discovery conversation into a structured diagnosis dict.
 
-            # Some providers/models expose only conversational APIs. Retry once
-            # with chat_completion so we can still use those routes.
-            try:
-                completion = self._fallback_client.chat_completion(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=model_id,
-                    max_tokens=max_tokens,
-                    temperature=0.2,
-                )
-                message = completion.choices[0].message
-                text = (message.content or "").strip()
-                if not text:
-                    raise ValueError("Empty response from chat_completion.")
-                print(f"[DEBUG] HF response: chat_completion ok, chars={len(text)}")
-                return text
-            except Exception as chat_error:
-                print(
-                    "[DEBUG] HF chat_completion exception: "
-                    f"{type(chat_error).__name__}: {chat_error}"
-                )
-                raise LLMError(
-                    "HF inference failed on both text_generation and chat_completion: "
-                    f"text_generation={type(text_gen_error).__name__}: {text_gen_error}; "
-                    f"chat_completion={type(chat_error).__name__}: {chat_error}"
-                ) from chat_error
-
-    @staticmethod
-    def extract_json(raw_text: str) -> dict[str, Any]:
-        """Extract and parse the first JSON object found in ``raw_text``.
-
-        LLMs often wrap JSON in prose or code fences; this method locates
-        the first ``{...}`` block and parses it, ignoring surrounding text.
+        Appends a final instruction to return strict JSON before sending.
 
         Args:
-            raw_text: Raw string output from the model.
+            system_prompt: Full Phase 1 system prompt text.
+            messages: Conversation history as a list of {"role", "content"} dicts.
 
         Returns:
-            A parsed dictionary representing the JSON object.
-
-        Raises:
-            LLMError: If no JSON object is present or the JSON is malformed.
+            Parsed dict with keys: summary, root_causes, prioritized_issues, risk_flags.
         """
-        # Use DOTALL so '.' matches newlines inside multi-line JSON objects.
-        match = re.search(r"\{.*\}", raw_text, flags=re.DOTALL)
-        if not match:
-            raise LLMError("No JSON object found in discovery model output.")
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError as exc:
-            raise LLMError("Invalid JSON in discovery model output.") from exc
+        # Append explicit JSON instruction so the model returns the structured output.
+        summary_instruction = (
+            "Now summarize the discovery conversation as strict JSON only. "
+            'Schema: {"summary": string, "root_causes": string[], "prioritized_issues": string[], "risk_flags": string[]}'
+        )
+        full_messages = (
+            [{"role": "system", "content": system_prompt}]
+            + messages
+            + [{"role": "user", "content": summary_instruction}]
+        )
+        response = self._client.chat_completion(
+            messages=full_messages,
+            model=settings.hf_model_discovery,
+            max_tokens=600,
+            temperature=0.1,
+        )
+        raw = response.choices[0].message.content.strip()
+        # Strip markdown code fences if the model wraps the JSON.
+        import re
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        return json.loads(match.group(0))
 
-    def run_discovery(self, prompt: str) -> dict[str, Any]:
-        """Run the Phase 1 discovery prompt and return a validated dict.
-
-        Calls the discovery model and then extracts the expected JSON
-        structure from the raw text response.
+    def generate_rewrite(self, system_prompt: str, original_text: str, diagnosis: dict) -> str:
+        """Generate a professional SBI rewrite from the original text and diagnosis.
 
         Args:
-            prompt: Fully-assembled discovery prompt string.
+            system_prompt: Full Phase 2 system prompt text.
+            original_text: The user's original feedback statement.
+            diagnosis: Structured diagnosis dict from summarize_discovery.
 
         Returns:
-            A dictionary whose keys should match the DiscoveryResult schema.
-
-        Raises:
-            LLMError: Propagated from ``_call_model`` or ``extract_json``.
+            The rewritten feedback as a plain string.
         """
-        raw = self._call_model(settings.hf_model_discovery, prompt, max_tokens=500)
-        return self.extract_json(raw)
+        user_content = (
+            f"Original feedback:\n{original_text}\n\n"
+            f"Diagnosis:\n{json.dumps(diagnosis, indent=2)}"
+        )
+        response = self._client.chat_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            model=settings.hf_model_rewrite,
+            max_tokens=400,
+            temperature=0.2,
+        )
+        return response.choices[0].message.content.strip()
 
-    def run_guided_discovery_turn(self, prompt: str) -> str:
-        """Run a Phase 1 guided follow-up turn and return the assistant's question.
-
-        Args:
-            prompt: Fully-assembled prompt containing the current conversation state.
-
-        Returns:
-            The assistant's next follow-up question as plain text.
-
-        Raises:
-            LLMError: Propagated from ``_call_model``.
-        """
-        return self._call_model(settings.hf_model_discovery, prompt, max_tokens=220).strip()
-
-    def run_rewrite(self, prompt: str) -> str:
-        """Run the Phase 2 rewrite prompt and return the generated text.
-
-        Args:
-            prompt: Fully-assembled rewrite prompt string, including the
-                original feedback and the diagnosed priorities.
-
-        Returns:
-            The rewritten feedback string, stripped of leading/trailing whitespace.
-
-        Raises:
-            LLMError: Propagated from ``_call_model``.
-        """
-        return self._call_model(settings.hf_model_rewrite, prompt, max_tokens=350).strip()

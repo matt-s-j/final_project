@@ -16,77 +16,55 @@ from __future__ import annotations
 
 import gradio as gr
 
-from feedback.models import DiscoveryResult, DiscoverySession
+from config import settings
 from feedback.processor import (
-    complete_discovery_session,
-    continue_discovery_session,
-    generate_composer_suggestion,
-    start_discovery_session,
+    complete_session,
+    continue_session,
+    generate_suggestion,
+    start_session,
 )
 
 
-def _format_discovery(discovery: DiscoveryResult) -> str:
-    """Render a DiscoveryResult as human-readable Markdown.
+def _format_discovery(discovery: dict) -> str:
+    """Render a diagnosis dict as human-readable Markdown.
 
     Args:
-        discovery: Completed discovery summary.
+        discovery: Diagnosis dict with keys: summary, root_causes, prioritized_issues, risk_flags.
 
     Returns:
-        Markdown with summary, root causes, prioritized issues, and risk flags.
+        Markdown string with summary, root causes, prioritized issues, and risk flags.
     """
-    causes = "\n".join(f"- {item}" for item in discovery.root_causes) or "- None"
-    issues = "\n".join(f"- {item}" for item in discovery.prioritized_issues) or "- None"
-    risks = "\n".join(f"- {item}" for item in discovery.risk_flags) or "- None"
+    causes = "\n".join(f"- {item}" for item in discovery.get("root_causes", [])) or "- None"
+    issues = "\n".join(f"- {item}" for item in discovery.get("prioritized_issues", [])) or "- None"
+    risks = "\n".join(f"- {item}" for item in discovery.get("risk_flags", [])) or "- None"
     return (
-        f"### Summary\n{discovery.summary}\n\n"
+        f"### Summary\n{discovery.get('summary', '')}\n\n"
         f"### Root Causes\n{causes}\n\n"
         f"### Prioritized Issues\n{issues}\n\n"
         f"### Risk Flags\n{risks}"
     )
 
 
-def _format_chat_messages(session: DiscoverySession | None) -> list[dict[str, str]]:
-    """Convert session messages into Gradio Chatbot message dictionaries.
-
-    Args:
-        session: Discovery session containing ordered conversation messages.
-
-    Returns:
-        A list of message dictionaries with ``role`` and ``content`` keys.
-    """
-    if session is None:
-        return []
-    return [message.model_dump() for message in session.messages]
-
-
 def _composer_outputs(
-    session: DiscoverySession | None,
+    session: dict | None,
     working_draft: str,
-) -> tuple[str, str, dict | None]:
-    """Generate composer-side outputs when the threshold allows it.
+) -> tuple[str, str]:
+    """Generate composer-side outputs once the minimum reply threshold is reached.
 
     Args:
-        session: Current discovery session.
+        session: Current discovery session dict, or None if not started.
         working_draft: User-owned Working Draft text.
 
     Returns:
-        A tuple of:
-          - composer suggestion text
-          - discovery summary markdown
-          - serialized discovery state
+        A tuple of (composer suggestion text, discovery summary markdown).
     """
-    if session is None or session.user_reply_count < session.min_rounds_required:
-        return "", "", None
+    # Only generate suggestions after the minimum fact-finding threshold.
+    if session is None or session["reply_count"] < settings.discovery_min_rounds:
+        return "", ""
 
-    composer_result = generate_composer_suggestion(working_draft, session)
-    if not composer_result.ok or composer_result.discovery is None:
-        return "", "", None
-
-    return (
-        composer_result.rewrite or "",
-        _format_discovery(composer_result.discovery),
-        composer_result.discovery.model_dump(),
-    )
+    suggestion = generate_suggestion(working_draft, session)
+    diagnosis = complete_session(session)
+    return suggestion, _format_discovery(diagnosis)
 
 
 def handle_send_response(
@@ -97,75 +75,47 @@ def handle_send_response(
     """Unified handler for both the initial complaint and every follow-up reply.
 
     When ``session_state`` is ``None`` this is the first submission, so it
-    calls ``start_discovery_session`` and seeds the Working Draft.  On every
-    subsequent call it delegates to ``continue_discovery_session``.
+    calls ``start_session`` and seeds the Working Draft. On every subsequent
+    call it delegates to ``continue_session``.
 
     Args:
         user_input: Text the user just typed — either the opening complaint or
             an answer to the latest assistant question.
-        session_state: Serialized ``DiscoverySession`` from Gradio state, or
-            ``None`` before discovery has started.
+        session_state: Session dict from Gradio state, or None before discovery starts.
         working_draft: Current user-owned Working Draft text (used by the
             composer after the minimum-rounds threshold is reached).
 
     Returns:
         Component updates for chatbot, session state, send button, complete
-        button, working draft, input box, composer suggestion, discovery
-        summary markdown, and serialized discovery state.
+        button, working draft, input box, composer suggestion, and discovery summary.
     """
     # --- First submission: start a new discovery session ---
     if session_state is None:
-        result = start_discovery_session(user_input)
-        if not result.ok:
-            # Show the error as an assistant message so the user sees feedback
-            # without a dedicated status box.
-            error_chat = [{"role": "assistant", "content": f"⚠️ {result.user_message}"}]
-            return (
-                error_chat,
-                None,
-                gr.update(interactive=True),
-                gr.update(interactive=False),
-                gr.update(),
-                gr.update(),
-                "",
-                "",
-                None,
-            )
-        assert result.session is not None
+        session = start_session(user_input)
         return (
-            _format_chat_messages(result.session),
-            result.session.model_dump(),
+            session["messages"],
+            session,
             gr.update(interactive=True),
             gr.update(interactive=False),
             user_input,   # seed the Working Draft with the opening complaint
             "",           # clear the input box
             "",
             "",
-            None,
         )
 
     # --- Subsequent submissions: continue the existing session ---
-    session = DiscoverySession(**session_state)
-    result = continue_discovery_session(session, user_input)
-    updated_session = result.session if result.session is not None else session
-    can_complete = (
-        updated_session is not None
-        and updated_session.user_reply_count >= updated_session.min_rounds_required
-    )
-    composer_suggestion, discovery_markdown, new_discovery_state = _composer_outputs(
-        updated_session,
-        working_draft,
-    )
+    session = continue_session(session_state, user_input)
+    can_complete = session["reply_count"] >= settings.discovery_min_rounds
+    composer_suggestion, discovery_markdown = _composer_outputs(session, working_draft)
     return (
-        _format_chat_messages(updated_session),
-        updated_session.model_dump() if updated_session is not None else None,
+        session["messages"],
+        session,
         gr.update(interactive=True),
         gr.update(interactive=can_complete),
         gr.update(),     # leave Working Draft untouched — it is user-owned
         "",              # clear the input box after each send
         composer_suggestion,
         discovery_markdown,
-        new_discovery_state,
     )
 
 
@@ -173,27 +123,22 @@ def handle_complete_discovery(session_state: dict | None, working_draft: str):
     """Manually complete discovery and refresh the composer suggestion.
 
     Args:
-        session_state: Serialized discovery session from Gradio state.
+        session_state: Session dict from Gradio state.
         working_draft: Current user-edited Working Draft text.
 
     Returns:
-        Component updates for summary, completion control, composer suggestion,
-        and serialized discovery state.
+        Component updates for summary markdown, completion button,
+        and composer suggestion.
     """
-    session = DiscoverySession(**session_state) if session_state else None
-    result = complete_discovery_session(session)
-    if not result.ok or result.discovery is None:
-        return "", gr.update(interactive=False), "", None
+    if session_state is None:
+        return "", gr.update(interactive=False), ""
 
-    composer_suggestion, discovery_markdown, discovery_state = _composer_outputs(
-        session,
-        working_draft,
-    )
+    diagnosis = complete_session(session_state)
+    suggestion = generate_suggestion(working_draft, session_state)
     return (
-        discovery_markdown or _format_discovery(result.discovery),
+        _format_discovery(diagnosis),
         gr.update(interactive=True),
-        composer_suggestion,
-        discovery_state or result.discovery.model_dump(),
+        suggestion,
     )
 
 
@@ -214,7 +159,6 @@ with gr.Blocks(title="AI Feedback Workflow MVP") as demo:
 
     # Session state shared across interaction handlers.
     discovery_session_state = gr.State(value=None)
-    discovery_state = gr.State(value=None)
 
     with gr.Row(equal_height=False):
         # Left 60%: chat and discovery controls.
@@ -260,7 +204,6 @@ with gr.Blocks(title="AI Feedback Workflow MVP") as demo:
             phase_one_reply,
             composer_suggestion,
             discovery_md,
-            discovery_state,
         ],
     )
 
@@ -271,10 +214,10 @@ with gr.Blocks(title="AI Feedback Workflow MVP") as demo:
             discovery_md,
             complete_discovery_btn,
             composer_suggestion,
-            discovery_state,
         ],
     )
 
 
 if __name__ == "__main__":
     demo.launch(theme=gr.themes.Glass())
+

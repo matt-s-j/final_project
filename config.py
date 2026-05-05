@@ -44,9 +44,8 @@ class Settings:
         hf_model_discovery: Model ID used for the Phase 1 discovery call.
         hf_model_rewrite: Model ID used for the Phase 2 rewrite call.
         hf_timeout_seconds: HTTP request timeout applied to every inference call.
-        min_input_length: Minimum character count required before processing begins (Gate 0).
         discovery_min_rounds: Minimum number of guided follow-up answers required
-            before Phase 1 can be completed and summarized.
+            before the composer suggestion unlocks.
         prompts_dir: Filesystem path for external markdown prompt specifications.
     """
 
@@ -66,10 +65,7 @@ class Settings:
     # Seconds to wait for a response before raising a timeout error.
     hf_timeout_seconds: int = int(os.getenv("HF_TIMEOUT_SECONDS", "25"))
 
-    # Inputs shorter than this are rejected at Gate 0 before any API call.
-    min_input_length: int = int(os.getenv("MIN_INPUT_LENGTH", "20"))
-
-    # Minimum number of follow-up answers required for the guided 5-whys intake.
+    # Minimum number of follow-up answers required before the composer unlocks.
     discovery_min_rounds: int = int(os.getenv("DISCOVERY_MIN_ROUNDS", "3"))
 
     # Directory containing markdown prompt specs for both bots.

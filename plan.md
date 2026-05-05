@@ -2,6 +2,7 @@
 
 ## Objective
 Build a Python-only MVP for a professional feedback workflow using Gradio, with local-first testing and Hugging Face deployment readiness.
+Simplicity is key! Do not overcomplexify at this moment since it is only an MVP.
 
 ## Core Workflow
 1. Phase 1: Discovery
