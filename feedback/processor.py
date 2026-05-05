@@ -259,8 +259,10 @@ def continue_discovery_session(
             ConversationMessage(
                 role="assistant",
                 content=(
-                    "We now have enough fact-finding context to start drafting suggestions in parallel. "
-                    "You can keep answering questions, and you can also complete discovery whenever you want a formal summary."
+                    "Thank you, this context is very helpful. I have started drafting a suggested "
+                    "feedback version on the right while we keep this conversation going. "
+                    "You can continue answering questions, and you can complete discovery whenever "
+                    "you want the formal summary."
                 ),
             )
         )

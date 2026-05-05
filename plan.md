@@ -52,11 +52,12 @@ Build a Python-only MVP for a professional feedback workflow using Gradio, with 
 - [x] Break out separate markdown files for the system prompts of the two agents
 - [x] Fix UI positioning of text boxes
 - [x] Hookup AI model backend using huggingface to test out real user experience
--Fix discovery prompt:
-    - Transisiton is very abrupt. Should flow better something like "Lets keep this going, but just so you know I have started drafting a suggested feedback submission on the right of the screen".
-- Fix composer prompt:
-    - Output should not be email, but rather a well structured CEO feedback box entry.
-    - Output should be around 100-300 words.
+- [x] Fix discovery prompt:
+    - [x] Transition flow is smoother and explicitly mentions drafting on the right while discovery continues.
+    - [x] Discovery questioning tone is less direct and more peace-brokering while preserving root-cause depth.
+- [x] Fix composer prompt:
+    - [x] Output is not email; it is a structured SBI feedback entry for direct individual feedback.
+    - [x] Output targets around 100-300 words.
 - [x] Clean up UI.
     - [x] Remove Initial Issue Statement box. Make the guided discovery box the place where the user enters the inital complaint.
     - [x] Remove the Phase 1 Status box.
