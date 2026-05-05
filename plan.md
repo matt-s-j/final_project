@@ -12,9 +12,10 @@ Build a Python-only MVP for a professional feedback workflow using Gradio, with 
   fact-finding, emotionally regulating, and critically focused on better outcomes.
 - Enforce strict safety and appropriateness checks before each model interaction.
 - Require enough guided follow-up rounds before Phase 1 can be completed.
-2. Phase 2: Rewrite
+2. Phase 2a: Rewrite
 - Generate a professional rewrite only after the guided Phase 1 intake has been completed,
   summarized into a structured diagnosis, and explicitly confirmed by the user.
+
 
 ## Gate Model
 1. Gate 0: Input Validity
@@ -51,6 +52,11 @@ Build a Python-only MVP for a professional feedback workflow using Gradio, with 
 - [x] Break out separate markdown files for the system prompts of the two agents
 - [x] Fix UI positioning of text boxes
 - [x] Hookup AI model backend using huggingface to test out real user experience
-- Clean up UI. 
-    - Remove the Phase 1 Status box.
-    - Make send response button orange or more vibrant
+-Fix discovery prompt:
+    - Transisiton is very abrupt. Should flow better something like "Lets keep this going, but just so you know I have started drafting a suggested feedback submission on the right of the screen".
+- Fix composer prompt:
+    - Output should not be email, but rather a well structured CEO feedback box entry.
+    - Output should be around 100-300 words.
+- [x] Clean up UI.
+    - [x] Remove Initial Issue Statement box. Make the guided discovery box the place where the user enters the inital complaint.
+    - [x] Remove the Phase 1 Status box.
